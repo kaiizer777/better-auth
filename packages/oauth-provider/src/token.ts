@@ -397,6 +397,16 @@ async function createIdToken(
 		return undefined;
 	}
 
+	if (
+		opts.disableJwtPlugin &&
+		(opts.storeClientSecret === "hashed" ||
+			(typeof opts.storeClientSecret === "object" &&
+				opts.storeClientSecret !== null &&
+				"hash" in opts.storeClientSecret))
+	) {
+		return undefined;
+	}
+
 	const idToken = opts.disableJwtPlugin
 		? await new SignJWT(payload)
 				.setProtectedHeader({ alg: "HS256" })
@@ -1149,6 +1159,25 @@ async function createUserTokens(
 			scopes.includes("offline_access"));
 	const isJwtAccessToken = audienceClaim && !opts.disableJwtPlugin;
 	const isIdToken = user && effectiveScopes.includes("openid");
+
+	const isHashedWithoutJwt =
+		Boolean(opts.disableJwtPlugin) &&
+		(opts.storeClientSecret === "hashed" ||
+			(typeof opts.storeClientSecret === "object" &&
+				opts.storeClientSecret !== null &&
+				"hash" in opts.storeClientSecret));
+
+	// Runtime guard: when JWT plugin is disabled, the ID token is signed with
+	// the raw client secret (HS256). A hashed secret cannot be recovered, so
+	// issuing an ID token is impossible — return a clear OAuth error rather
+	// than letting decryptStoredClientSecret throw an opaque internal error.
+	if (isHashedWithoutJwt && (isIdToken || effectiveScopes.includes("openid"))) {
+		throw new APIError("BAD_REQUEST", {
+			error: "invalid_scope",
+			error_description:
+				"ID tokens cannot be issued when JWT plugin is disabled and client secret is hashed",
+		});
+	}
 	const metadata = parseClientMetadata(client.metadata);
 	const additionalIdTokenClaims =
 		isIdToken && user

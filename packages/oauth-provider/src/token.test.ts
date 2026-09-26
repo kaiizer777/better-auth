@@ -5013,3 +5013,285 @@ describe("confirmationTokenType", () => {
 		expect(confirmationTokenType(undefined)).toBe("Bearer");
 	});
 });
+
+/**
+ * @see https://github.com/better-auth/better-auth/issues/11416
+ */
+describe("disableJwtPlugin + storeClientSecret hashed grant flow", async () => {
+	const authServerBaseUrl = "http://localhost:3000";
+	const rpBaseUrl = "http://localhost:5000";
+	const providerId = "test";
+	const redirectUri = `${rpBaseUrl}/api/auth/callback/${providerId}`;
+
+	const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance({
+		baseURL: authServerBaseUrl,
+		plugins: [
+			oauthProvider({
+				loginPage: "/login",
+				consentPage: "/consent",
+				disableJwtPlugin: true,
+				storeClientSecret: "hashed",
+				scopes: ["profile", "email"],
+			}),
+		],
+	});
+
+	const context = await auth.$context;
+	const { headers } = await signInWithTestUser();
+	const session = await auth.api.getSession({ headers });
+	const client = createAuthClient({
+		plugins: [oauthProviderClient()],
+		baseURL: authServerBaseUrl,
+		fetchOptions: {
+			customFetchImpl,
+			headers,
+		},
+	});
+
+	it("11416: completes authorization code grant flow without id_token", async ({
+		expect,
+	}) => {
+		const oauthClient = await auth.api.adminCreateOAuthClient({
+			headers,
+			body: {
+				token_endpoint_auth_method: "client_secret_post",
+				grant_types: ["authorization_code", "refresh_token"],
+				redirect_uris: [redirectUri],
+				application_type: "native",
+				skip_consent: true,
+			},
+		});
+		expect(oauthClient?.client_id).toBeDefined();
+
+		const codeVerifier = generateRandomString(32);
+		const url = await createAuthorizationURL({
+			id: providerId,
+			options: {
+				clientId: oauthClient!.client_id,
+				clientSecret: oauthClient!.client_secret!,
+				redirectURI: redirectUri,
+			},
+			redirectURI: "",
+			authorizationEndpoint: `${authServerBaseUrl}/api/auth/oauth2/authorize`,
+			state: "test-state",
+			scopes: ["profile", "email"],
+			codeVerifier,
+		});
+
+		let callbackRedirectUrl = "";
+		await client.$fetch(url.toString(), {
+			onError(context) {
+				callbackRedirectUrl = context.response.headers.get("Location") || "";
+			},
+		});
+		expect(callbackRedirectUrl).toContain(redirectUri);
+		expect(callbackRedirectUrl).toContain("code=");
+		const code = new URL(callbackRedirectUrl).searchParams.get("code")!;
+
+		const { body, headers: reqHeaders } = await authorizationCodeRequest({
+			code,
+			codeVerifier,
+			redirectURI: redirectUri,
+			options: {
+				clientId: oauthClient!.client_id,
+				clientSecret: oauthClient!.client_secret!,
+				redirectURI: redirectUri,
+			},
+		});
+
+		const tokens = await client.$fetch<OAuthTokenResponse>("/oauth2/token", {
+			method: "POST",
+			body,
+			headers: reqHeaders,
+		});
+
+		expect(tokens.data?.access_token).toBeDefined();
+		expect(tokens.data?.id_token).toBeUndefined();
+		expect(tokens.data?.scope).toBe("profile email");
+	});
+
+	it("11416: rejects requested openid scope when client is seeded with openid in scopes", async ({
+		expect,
+	}) => {
+		const oauthClient = await auth.api.adminCreateOAuthClient({
+			headers,
+			body: {
+				token_endpoint_auth_method: "client_secret_post",
+				grant_types: ["authorization_code", "refresh_token"],
+				redirect_uris: [redirectUri],
+				application_type: "native",
+				skip_consent: true,
+			},
+		});
+		expect(oauthClient?.client_id).toBeDefined();
+
+		// Seed client with openid scope directly in the database
+		await context.adapter.update({
+			model: "oauthClient",
+			where: [{ field: "clientId", value: oauthClient!.client_id }],
+			update: { scopes: ["openid", "profile"] },
+		});
+
+		const codeVerifier = generateRandomString(32);
+		const url = await createAuthorizationURL({
+			id: providerId,
+			options: {
+				clientId: oauthClient!.client_id,
+				clientSecret: oauthClient!.client_secret!,
+				redirectURI: redirectUri,
+			},
+			redirectURI: "",
+			authorizationEndpoint: `${authServerBaseUrl}/api/auth/oauth2/authorize`,
+			state: "test-state",
+			scopes: ["openid", "profile"],
+			codeVerifier,
+		});
+
+		let callbackRedirectUrl = "";
+		await client.$fetch(url.toString(), {
+			onError(context) {
+				callbackRedirectUrl = context.response.headers.get("Location") || "";
+			},
+		});
+		expect(callbackRedirectUrl).toContain(redirectUri);
+		expect(callbackRedirectUrl).toContain("error=invalid_scope");
+	});
+
+	it("11416: omits openid from default scopes when client is seeded with openid in scopes and scope is omitted", async ({
+		expect,
+	}) => {
+		const oauthClient = await auth.api.adminCreateOAuthClient({
+			headers,
+			body: {
+				token_endpoint_auth_method: "client_secret_post",
+				grant_types: ["authorization_code", "refresh_token"],
+				redirect_uris: [redirectUri],
+				application_type: "native",
+				skip_consent: true,
+			},
+		});
+		expect(oauthClient?.client_id).toBeDefined();
+
+		// Seed client with openid scope directly in the database
+		await context.adapter.update({
+			model: "oauthClient",
+			where: [{ field: "clientId", value: oauthClient!.client_id }],
+			update: { scopes: ["openid", "profile"] },
+		});
+
+		const codeVerifier = generateRandomString(32);
+		const digest = await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(codeVerifier),
+		);
+		const codeChallenge = Buffer.from(digest).toString("base64url");
+		const authUrl = new URL(`${authServerBaseUrl}/api/auth/oauth2/authorize`);
+		authUrl.searchParams.set("client_id", oauthClient!.client_id);
+		authUrl.searchParams.set("redirect_uri", redirectUri);
+		authUrl.searchParams.set("response_type", "code");
+		authUrl.searchParams.set("state", "test-state-no-scope");
+		authUrl.searchParams.set("code_challenge", codeChallenge);
+		authUrl.searchParams.set("code_challenge_method", "S256");
+
+		let callbackRedirectUrl = "";
+		await client.$fetch(authUrl.toString(), {
+			onError(context) {
+				callbackRedirectUrl = context.response.headers.get("Location") || "";
+			},
+		});
+		expect(callbackRedirectUrl).toContain(redirectUri);
+		expect(callbackRedirectUrl).toContain("code=");
+		expect(callbackRedirectUrl).not.toContain("error=");
+
+		const code = new URL(callbackRedirectUrl).searchParams.get("code")!;
+		const { body, headers: reqHeaders } = await authorizationCodeRequest({
+			code,
+			codeVerifier,
+			redirectURI: redirectUri,
+			options: {
+				clientId: oauthClient!.client_id,
+				clientSecret: oauthClient!.client_secret!,
+				redirectURI: redirectUri,
+			},
+		});
+
+		const tokens = await client.$fetch<OAuthTokenResponse>("/oauth2/token", {
+			method: "POST",
+			body,
+			headers: reqHeaders,
+		});
+
+		expect(tokens.data?.access_token).toBeDefined();
+		expect(tokens.data?.id_token).toBeUndefined();
+		expect(tokens.data?.scope).toBe("profile");
+	});
+
+	it("11416: returns invalid_scope (not 500) if token endpoint is called with openid scope", async ({
+		expect,
+	}) => {
+		const oauthClient = await auth.api.adminCreateOAuthClient({
+			headers,
+			body: {
+				token_endpoint_auth_method: "client_secret_post",
+				grant_types: ["authorization_code", "refresh_token"],
+				redirect_uris: [redirectUri],
+				application_type: "native",
+				skip_consent: true,
+			},
+		});
+
+		// Seed client so openid is in client scopes to test runtime token issuance guard
+		await context.adapter.update({
+			model: "oauthClient",
+			where: [{ field: "clientId", value: oauthClient!.client_id }],
+			update: { scopes: ["openid", "profile"] },
+		});
+
+		const code = generateRandomString(32);
+		const codeVerifier = generateRandomString(43);
+		const digest = await crypto.subtle.digest(
+			"SHA-256",
+			new TextEncoder().encode(codeVerifier),
+		);
+		const codeChallenge = Buffer.from(digest).toString("base64url");
+		const hashedCode = await storeToken("hashed", code, "authorization_code");
+
+		await context.internalAdapter.createVerificationValue({
+			identifier: hashedCode,
+			value: JSON.stringify({
+				type: "authorization_code",
+				clientId: oauthClient!.client_id,
+				userId: session!.user.id,
+				sessionId: session!.session.id,
+				redirectUri,
+				query: {
+					scope: "openid profile",
+					response_type: "code",
+					client_id: oauthClient!.client_id,
+					redirect_uri: redirectUri,
+					code_challenge: codeChallenge,
+					code_challenge_method: "S256",
+				},
+			}),
+			expiresAt: new Date(Date.now() + 600000),
+		});
+
+		const response = await client.$fetch<{ error?: string }>("/oauth2/token", {
+			method: "POST",
+			headers: {
+				"content-type": "application/x-www-form-urlencoded",
+			},
+			body: new URLSearchParams({
+				grant_type: "authorization_code",
+				code,
+				code_verifier: codeVerifier,
+				client_id: oauthClient!.client_id,
+				client_secret: oauthClient!.client_secret!,
+				redirect_uri: redirectUri,
+			}),
+		});
+
+		expect(response.error?.status).toBe(400);
+		expect((response.error as { error?: string })?.error).toBe("invalid_scope");
+	});
+});

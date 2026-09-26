@@ -576,10 +576,22 @@ export async function authorizeEndpoint(
 	}
 	// Check for invalid scopes if requested from query
 	let requestedScopes = query.scope?.split(" ").filter((s) => s);
+	const providerScopes = new Set(opts.scopes ?? []);
+	const isHashedWithoutJwt =
+		Boolean(opts.disableJwtPlugin) &&
+		(opts.storeClientSecret === "hashed" ||
+			(typeof opts.storeClientSecret === "object" &&
+				opts.storeClientSecret !== null &&
+				"hash" in opts.storeClientSecret));
+	const allowedScopes = (
+		client.scopes
+			? client.scopes.filter((scope) => providerScopes.has(scope))
+			: (opts.scopes ?? [])
+	).filter((scope) => !isHashedWithoutJwt || scope !== "openid");
+	const validScopes = new Set(allowedScopes);
 	if (requestedScopes) {
-		const validScopes = new Set(client.scopes ?? opts.scopes);
 		const invalidScopes = requestedScopes.filter((scope) => {
-			return !validScopes?.has(scope);
+			return !validScopes.has(scope);
 		});
 		if (invalidScopes.length) {
 			return handleRedirect(
@@ -596,7 +608,7 @@ export async function authorizeEndpoint(
 	}
 	// Always set default scopes if not originally sent
 	if (!requestedScopes) {
-		requestedScopes = client.scopes ?? opts.scopes ?? [];
+		requestedScopes = allowedScopes;
 		query.scope = requestedScopes.join(" ");
 	}
 	const openidRequested = requestedScopes.includes("openid");

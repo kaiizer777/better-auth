@@ -133,7 +133,18 @@ export async function updateConsentEndpoint(
 		});
 	}
 
-	const allowedScopes = client?.scopes ?? opts.scopes ?? [];
+	const providerScopes = new Set(opts.scopes ?? []);
+	const isHashedWithoutJwt =
+		Boolean(opts.disableJwtPlugin) &&
+		(opts.storeClientSecret === "hashed" ||
+			(typeof opts.storeClientSecret === "object" &&
+				opts.storeClientSecret !== null &&
+				"hash" in opts.storeClientSecret));
+	const allowedScopes = (
+		client?.scopes
+			? client.scopes.filter((scope) => providerScopes.has(scope))
+			: (opts.scopes ?? [])
+	).filter((scope) => !isHashedWithoutJwt || scope !== "openid");
 
 	// Check if scopes are granted to that client
 	const updates = ctx.body.update as Partial<OAuthConsent>;

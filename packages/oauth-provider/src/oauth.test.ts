@@ -158,6 +158,41 @@ describe("oauth - init", () => {
 				"unable to store hashed secrets because id tokens will be signed with secret",
 			);
 		});
+
+		it("should still throw when openid IS in scopes with disableJwtPlugin + object-form custom hash", ({
+			expect,
+		}) => {
+			expect(() =>
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					disableJwtPlugin: true,
+					scopes: ["openid", "profile", "email", "offline_access"],
+					storeClientSecret: {
+						hash: async (s: string) => s,
+					},
+				}),
+			).toThrow(
+				"unable to store hashed secrets because id tokens will be signed with secret",
+			);
+		});
+
+		it("should still throw with default scopes (which include openid) with disableJwtPlugin + object-form custom hash", ({
+			expect,
+		}) => {
+			expect(() =>
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					disableJwtPlugin: true,
+					storeClientSecret: {
+						hash: async (s: string) => s,
+					},
+				}),
+			).toThrow(
+				"unable to store hashed secrets because id tokens will be signed with secret",
+			);
+		});
 	});
 
 	it("should pass with correct plugins", async () => {
