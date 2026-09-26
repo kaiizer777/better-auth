@@ -10,6 +10,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import * as z from "zod";
 import { formatErrorURL, validateIssuerUrl } from "./authorize";
 import { oauthProviderClient } from "./client";
+import { verifyOAuthQueryParams } from "./index";
 import { oauthProvider } from "./oauth";
 import {
 	canonicalizeOAuthQueryParams,
@@ -19,7 +20,7 @@ import {
 } from "./signed-query";
 import type { OAuthConsent, OAuthOptions, Scope } from "./types";
 import type { OAuthClient } from "./types/oauth";
-import { storeToken, verifyOAuthQueryParams } from "./utils";
+import { storeToken } from "./utils";
 
 const signedQueryParameterNameParam = "ba_param";
 
@@ -1521,7 +1522,21 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 	const rpBaseUrl = "http://localhost:5000";
 	const redirectUri = `${rpBaseUrl}/api/auth/callback/test`;
 
-	it("decouples authorization code TTL from signed query hop TTL (codeExpiresIn: 60, signedQueryExpiresIn: 600)", async () => {
+	async function expectSignedQueryHopAndCodeTtl(options: {
+		codeExpiresIn?: number;
+		signedQueryExpiresIn?: number;
+		expectedSignedHopTtl: number;
+		expectedCodeTtl: number;
+		state?: string;
+	}) {
+		const {
+			codeExpiresIn,
+			signedQueryExpiresIn,
+			expectedSignedHopTtl,
+			expectedCodeTtl,
+			state = "test-state",
+		} = options;
+
 		const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance(
 			{
 				baseURL: authServerBaseUrl,
@@ -1529,8 +1544,8 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 					oauthProvider({
 						loginPage: "/login",
 						consentPage: "/consent",
-						codeExpiresIn: 60,
-						signedQueryExpiresIn: 600,
+						codeExpiresIn,
+						signedQueryExpiresIn,
 					}),
 					jwt(),
 				],
@@ -1573,7 +1588,7 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 				clientSecret: registeredClient.client_secret,
 			},
 			redirectURI: redirectUri,
-			state: "test-state",
+			state,
 			scopes: ["openid"],
 			responseType: "code",
 			codeVerifier: generateRandomString(64),
@@ -1592,11 +1607,14 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 		const signedIat = Math.floor(
 			Number(loginRedirect.searchParams.get(signedQueryIssuedAtParam)) / 1000,
 		);
-		expect(signedExp - signedIat).toBe(600);
+		expect(signedExp - signedIat).toBe(expectedSignedHopTtl);
 
-		// 2. Authenticated authorize request returns authorization code
+		// 2. Authenticated authorize request resumes through the signed redirect query
+		const resumeUrl = new URL(
+			`${authServerBaseUrl}/api/auth/oauth2/authorize?${loginRedirect.searchParams.toString()}`,
+		);
 		let callbackRedirectUrl = "";
-		await client.$fetch(authUrl.toString(), {
+		await client.$fetch(resumeUrl.toString(), {
 			headers,
 			onError(context) {
 				callbackRedirectUrl = context.response.headers.get("Location") || "";
@@ -1606,6 +1624,7 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 		const callbackUrl = new URL(callbackRedirectUrl);
 		const code = callbackUrl.searchParams.get("code");
 		expect(code).toBeDefined();
+		expect(callbackUrl.searchParams.get("state")).toBe(state);
 
 		const hashedCode = await storeToken("hashed", code!, "authorization_code");
 		const context = await auth.$context;
@@ -1615,195 +1634,35 @@ describe("signedQueryExpiresIn and codeExpiresIn decoupling (#11204)", () => {
 		const codeTtlSeconds = Math.round(
 			(record!.expiresAt.getTime() - record!.createdAt.getTime()) / 1000,
 		);
-		expect(codeTtlSeconds).toBe(60);
+		expect(codeTtlSeconds).toBe(expectedCodeTtl);
+	}
+
+	it("decouples authorization code TTL from signed query hop TTL (codeExpiresIn: 60, signedQueryExpiresIn: 600)", async () => {
+		await expectSignedQueryHopAndCodeTtl({
+			codeExpiresIn: 60,
+			signedQueryExpiresIn: 600,
+			expectedSignedHopTtl: 600,
+			expectedCodeTtl: 60,
+			state: "test-state",
+		});
 	});
 
 	it("decouples authorization code TTL from signed query hop TTL (codeExpiresIn: 600, signedQueryExpiresIn: 60)", async () => {
-		const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance(
-			{
-				baseURL: authServerBaseUrl,
-				plugins: [
-					oauthProvider({
-						loginPage: "/login",
-						consentPage: "/consent",
-						codeExpiresIn: 600,
-						signedQueryExpiresIn: 60,
-					}),
-					jwt(),
-				],
-			},
-		);
-		const { headers } = await signInWithTestUser();
-		const client = createAuthClient({
-			plugins: [oauthProviderClient()],
-			baseURL: authServerBaseUrl,
-			fetchOptions: {
-				customFetchImpl,
-			},
-		});
-
-		const registeredClient = await auth.api.adminCreateOAuthClient({
-			headers,
-			body: {
-				redirect_uris: [redirectUri],
-				application_type: "native",
-				skip_consent: true,
-			},
-		});
-		if (!registeredClient?.client_id || !registeredClient?.client_secret) {
-			throw Error("client creation failed");
-		}
-
-		const unauthenticatedClient = createAuthClient({
-			plugins: [oauthProviderClient()],
-			baseURL: authServerBaseUrl,
-			fetchOptions: {
-				customFetchImpl,
-			},
-		});
-
-		const authUrl = await createAuthorizationURL({
-			id: "test",
-			options: {
-				clientId: registeredClient.client_id,
-				clientSecret: registeredClient.client_secret,
-			},
-			redirectURI: redirectUri,
+		await expectSignedQueryHopAndCodeTtl({
+			codeExpiresIn: 600,
+			signedQueryExpiresIn: 60,
+			expectedSignedHopTtl: 60,
+			expectedCodeTtl: 600,
 			state: "test-state-2",
-			scopes: ["openid"],
-			responseType: "code",
-			codeVerifier: generateRandomString(64),
-			authorizationEndpoint: `${authServerBaseUrl}/api/auth/oauth2/authorize`,
 		});
-
-		let loginRedirectUrl = "";
-		await unauthenticatedClient.$fetch(authUrl.toString(), {
-			onError(context) {
-				loginRedirectUrl = context.response.headers.get("Location") || "";
-			},
-		});
-
-		const loginRedirect = new URL(loginRedirectUrl, authServerBaseUrl);
-		const signedExp = Number(loginRedirect.searchParams.get("exp"));
-		const signedIat = Math.floor(
-			Number(loginRedirect.searchParams.get(signedQueryIssuedAtParam)) / 1000,
-		);
-		expect(signedExp - signedIat).toBe(60);
-
-		let callbackRedirectUrl = "";
-		await client.$fetch(authUrl.toString(), {
-			headers,
-			onError(context) {
-				callbackRedirectUrl = context.response.headers.get("Location") || "";
-			},
-		});
-
-		const callbackUrl = new URL(callbackRedirectUrl);
-		const code = callbackUrl.searchParams.get("code");
-		expect(code).toBeDefined();
-
-		const hashedCode = await storeToken("hashed", code!, "authorization_code");
-		const context = await auth.$context;
-		const record =
-			await context.internalAdapter.findVerificationValue(hashedCode);
-		expect(record).toBeDefined();
-		const codeTtlSeconds = Math.round(
-			(record!.expiresAt.getTime() - record!.createdAt.getTime()) / 1000,
-		);
-		expect(codeTtlSeconds).toBe(600);
 	});
 
 	it("falls back to codeExpiresIn when signedQueryExpiresIn is not specified", async () => {
-		const { auth, signInWithTestUser, customFetchImpl } = await getTestInstance(
-			{
-				baseURL: authServerBaseUrl,
-				plugins: [
-					oauthProvider({
-						loginPage: "/login",
-						consentPage: "/consent",
-						codeExpiresIn: 120,
-					}),
-					jwt(),
-				],
-			},
-		);
-		const { headers } = await signInWithTestUser();
-		const client = createAuthClient({
-			plugins: [oauthProviderClient()],
-			baseURL: authServerBaseUrl,
-			fetchOptions: {
-				customFetchImpl,
-			},
-		});
-
-		const registeredClient = await auth.api.adminCreateOAuthClient({
-			headers,
-			body: {
-				redirect_uris: [redirectUri],
-				application_type: "native",
-				skip_consent: true,
-			},
-		});
-		if (!registeredClient?.client_id || !registeredClient?.client_secret) {
-			throw Error("client creation failed");
-		}
-
-		const unauthenticatedClient = createAuthClient({
-			plugins: [oauthProviderClient()],
-			baseURL: authServerBaseUrl,
-			fetchOptions: {
-				customFetchImpl,
-			},
-		});
-
-		const authUrl = await createAuthorizationURL({
-			id: "test",
-			options: {
-				clientId: registeredClient.client_id,
-				clientSecret: registeredClient.client_secret,
-			},
-			redirectURI: redirectUri,
+		await expectSignedQueryHopAndCodeTtl({
+			codeExpiresIn: 120,
+			expectedSignedHopTtl: 120,
+			expectedCodeTtl: 120,
 			state: "test-state-3",
-			scopes: ["openid"],
-			responseType: "code",
-			codeVerifier: generateRandomString(64),
-			authorizationEndpoint: `${authServerBaseUrl}/api/auth/oauth2/authorize`,
 		});
-
-		let loginRedirectUrl = "";
-		await unauthenticatedClient.$fetch(authUrl.toString(), {
-			onError(context) {
-				loginRedirectUrl = context.response.headers.get("Location") || "";
-			},
-		});
-
-		const loginRedirect = new URL(loginRedirectUrl, authServerBaseUrl);
-		const signedExp = Number(loginRedirect.searchParams.get("exp"));
-		const signedIat = Math.floor(
-			Number(loginRedirect.searchParams.get(signedQueryIssuedAtParam)) / 1000,
-		);
-		expect(signedExp - signedIat).toBe(120);
-
-		let callbackRedirectUrl = "";
-		await client.$fetch(authUrl.toString(), {
-			headers,
-			onError(context) {
-				callbackRedirectUrl = context.response.headers.get("Location") || "";
-			},
-		});
-
-		const callbackUrl = new URL(callbackRedirectUrl);
-		const code = callbackUrl.searchParams.get("code");
-		expect(code).toBeDefined();
-
-		const hashedCode = await storeToken("hashed", code!, "authorization_code");
-		const fallbackContext = await auth.$context;
-		const record =
-			await fallbackContext.internalAdapter.findVerificationValue(hashedCode);
-		expect(record).toBeDefined();
-		const codeTtlSeconds = Math.round(
-			(record!.expiresAt.getTime() - record!.createdAt.getTime()) / 1000,
-		);
-		expect(codeTtlSeconds).toBe(120);
 	});
 });
