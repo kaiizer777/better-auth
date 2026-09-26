@@ -98,6 +98,68 @@ describe("oauth - init", () => {
 		).resolves.not.toThrowError();
 	});
 
+	/**
+	 * @see https://github.com/better-auth/better-auth/issues/11416
+	 */
+	describe("disableJwtPlugin + storeClientSecret hashed without openid scope", () => {
+		it("should NOT throw when openid is absent from scopes (pure OAuth2/MCP)", async ({
+			expect,
+		}) => {
+			await expect(
+				getTestInstance({
+					plugins: [
+						oauthProvider({
+							loginPage: "/login",
+							consentPage: "/consent",
+							disableJwtPlugin: true,
+							// Explicitly omit "openid" — pure OAuth 2.0, no OIDC, no ID tokens
+							scopes: ["profile", "email", "offline_access"],
+							storeClientSecret: "hashed",
+						}),
+					],
+				}),
+			).resolves.not.toThrowError();
+		});
+
+		it("should NOT throw when openid is absent and using custom hash function", async ({
+			expect,
+		}) => {
+			await expect(
+				getTestInstance({
+					plugins: [
+						oauthProvider({
+							loginPage: "/login",
+							consentPage: "/consent",
+							disableJwtPlugin: true,
+							scopes: ["profile", "email", "offline_access"],
+							storeClientSecret: {
+								hash: async (secret: string) => secret,
+								verify: async (secret: string, stored: string) =>
+									secret === stored,
+							},
+						}),
+					],
+				}),
+			).resolves.not.toThrowError();
+		});
+
+		it("should still throw when openid IS in scopes with disableJwtPlugin + hashed", ({
+			expect,
+		}) => {
+			expect(() =>
+				oauthProvider({
+					loginPage: "/login",
+					consentPage: "/consent",
+					disableJwtPlugin: true,
+					scopes: ["openid", "profile", "email", "offline_access"],
+					storeClientSecret: "hashed",
+				}),
+			).toThrow(
+				"unable to store hashed secrets because id tokens will be signed with secret",
+			);
+		});
+	});
+
 	it("should pass with correct plugins", async () => {
 		await expect(
 			getTestInstance({

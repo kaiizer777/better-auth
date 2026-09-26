@@ -1051,12 +1051,18 @@ export interface OAuthOptions<
 	 * 	verify?: (clientSecret: string, storedHash: string) => Awaitable<boolean>
 	 * } - A function that hashes the client secret.
 	 *
-	 * When disableJwtPlugin = true:
+	 * When disableJwtPlugin = true AND the "openid" scope is configured (OIDC enabled):
 	 * - "encrypted" - The client secret is encrypted using the `encrypt` function.
 	 * - {
 	 * 	encrypt: (clientSecret: string) => Awaitable<string>,
 	 * 	decrypt: (storedSecret: string) => Awaitable<string>
 	 * } - A function that encrypts and decrypts the client secret.
+	 * NOTE: "hashed" is not allowed in this case because the secret must be
+	 * recoverable to sign ID tokens.
+	 *
+	 * When disableJwtPlugin = true AND the "openid" scope is NOT configured (pure OAuth 2.0 / MCP):
+	 * - "hashed" or a custom hash function are also allowed, because no ID tokens
+	 * are issued and the secret never needs to be recovered for signing purposes.
 	 *
 	 * @default
 	 * options.disableJwtPlugin ? "encrypted" : "hashed"

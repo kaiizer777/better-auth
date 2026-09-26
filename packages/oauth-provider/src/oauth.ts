@@ -252,6 +252,7 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 
 	if (
 		opts.disableJwtPlugin &&
+		scopes.has("openid") &&
 		(opts.storeClientSecret === "hashed" ||
 			(typeof opts.storeClientSecret === "object" &&
 				"hash" in opts.storeClientSecret))
