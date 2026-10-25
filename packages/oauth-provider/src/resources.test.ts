@@ -129,7 +129,7 @@ describe("seedResources (integration via plugin init)", () => {
 			policyVersion: 1,
 			accessTokenTtl: null,
 			signingAlgorithm: null,
-			allowedScopes: null,
+			allowedScopes: [],
 		});
 	});
 
@@ -257,7 +257,7 @@ describe("seedResources (integration via plugin init)", () => {
 		expect(row).toMatchObject({
 			name: identifier, // overwrite uses identifier as default name
 			accessTokenTtl: 120,
-			allowedScopes: null, // cleared
+			allowedScopes: [], // cleared
 		});
 	});
 });

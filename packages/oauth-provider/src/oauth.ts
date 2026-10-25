@@ -40,6 +40,7 @@ import * as oauthConsentEndpoints from "./oauthConsent";
 import * as oauthResourceEndpoints from "./oauthResource";
 import { registerEndpoint } from "./register";
 import {
+	EMPTY_ALLOWED_SCOPES_MESSAGE,
 	extractRepeatedResourceFromForm,
 	logEnforcePerClientResourcesResolution,
 	logStartupSeedFailure,
@@ -193,6 +194,20 @@ export const oauthProvider = <O extends OAuthOptions<Scope[]>>(options: O) => {
 					`${optionName} resource ${identifier} not found in resources`,
 				);
 			}
+		}
+	}
+
+	for (const resource of options.resources ?? []) {
+		if (typeof resource === "string") continue;
+		if (
+			resource.allowedScopes?.length === 0 ||
+			resource.allowedScopes?.some(
+				(s) => typeof s !== "string" || s.trim().length === 0,
+			)
+		) {
+			throw new BetterAuthError(
+				`resources entry ${resource.identifier}: ${EMPTY_ALLOWED_SCOPES_MESSAGE}`,
+			);
 		}
 	}
 

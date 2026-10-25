@@ -1,6 +1,6 @@
 import { createAuthEndpoint } from "better-auth/api";
 import * as z from "zod";
-import { JWS_ALGORITHMS } from "../resources";
+import { EMPTY_ALLOWED_SCOPES_MESSAGE, JWS_ALGORITHMS } from "../resources";
 import type { OAuthOptions, Scope } from "../types";
 import {
 	createResourceEndpoint,
@@ -24,8 +24,11 @@ const resourceBodySchema = z.object({
 	refreshTokenTtl: z.number().int().positive().nullable().optional(),
 	signingAlgorithm: z.enum(JWS_ALGORITHMS).nullable().optional(),
 	signingKeyId: z.string().nullable().optional(),
-	// FIXME(#11725): reject [] and point callers to `disabled` or `null`.
-	allowedScopes: z.array(z.string()).nullable().optional(),
+	allowedScopes: z
+		.array(z.string().min(1, "scope cannot be empty"))
+		.min(1, EMPTY_ALLOWED_SCOPES_MESSAGE)
+		.nullable()
+		.optional(),
 	customClaims: z.record(z.string(), z.unknown()).nullable().optional(),
 	dpopBoundAccessTokensRequired: z.boolean().optional(),
 	disabled: z.boolean().optional(),
