@@ -1,6 +1,14 @@
 import type { GenericEndpointContext } from "@better-auth/core";
 import { APIError, getSessionFromCtx } from "better-auth/api";
-import { assertIdentifierValid, invalidateResourceCache } from "../resources";
+import {
+	assertIdentifierValid,
+	combineResource,
+	ensureResourceRow,
+	getConfiguredResource,
+	getConfiguredResourcesMap,
+	getResource,
+	invalidateResourceCache,
+} from "../resources";
 import type {
 	OAuthOptions,
 	OAuthResource,
@@ -90,6 +98,13 @@ export async function createResourceEndpoint(
 	}
 	await assertIdentifierValid(opts, input.identifier);
 
+	if (getConfiguredResource(opts, input.identifier)) {
+		throw new APIError("BAD_REQUEST", {
+			error: "invalid_request",
+			error_description: `resource ${input.identifier} already exists`,
+		});
+	}
+
 	const now = new Date();
 	let created: OAuthResource;
 	try {
@@ -126,11 +141,31 @@ export async function listResourcesEndpoint(
 ) {
 	const session = await getSessionFromCtx(ctx);
 	await assertResourcePrivileges(ctx, session, opts, "list");
-	// TODO(#11725): include configured resources that have no row yet.
-	const rows = await ctx.context.adapter.findMany<OAuthResource>({
-		model: resourceModel(opts),
-	});
-	return ctx.json(rows ?? []);
+	const rows =
+		(await ctx.context.adapter.findMany<OAuthResource>({
+			model: resourceModel(opts),
+		})) ?? [];
+
+	const configuredMap = getConfiguredResourcesMap(opts);
+	const mode = opts.resourceSeedMode ?? "insertOnly";
+	const rowIdentifiers = new Set(rows.map((r) => r.identifier));
+	const result: OAuthResource[] = [];
+
+	for (const row of rows) {
+		const configured = configuredMap.get(row.identifier);
+		const combined = combineResource(row, configured, mode);
+		if (combined) {
+			result.push(combined);
+		}
+	}
+
+	for (const [identifier, configured] of configuredMap) {
+		if (!rowIdentifiers.has(identifier)) {
+			result.push({ ...configured.resource });
+		}
+	}
+
+	return ctx.json(result);
 }
 
 export async function getResourceByIdentifierEndpoint(
@@ -140,10 +175,7 @@ export async function getResourceByIdentifierEndpoint(
 	const identifier = decodePathParam(ctx.params.identifier);
 	const session = await getSessionFromCtx(ctx);
 	await assertResourcePrivileges(ctx, session, opts, "read", identifier);
-	const row = await ctx.context.adapter.findOne<OAuthResource>({
-		model: resourceModel(opts),
-		where: [{ field: "identifier", value: identifier }],
-	});
+	const row = await getResource(ctx, opts, identifier);
 	if (!row) {
 		throw new APIError("NOT_FOUND", {
 			error: "not_found",
@@ -164,10 +196,7 @@ export async function updateResourceEndpoint(
 	const session = await getSessionFromCtx(ctx);
 	await assertResourcePrivileges(ctx, session, opts, "update", identifier);
 
-	const existing = await ctx.context.adapter.findOne<OAuthResource>({
-		model: resourceModel(opts),
-		where: [{ field: "identifier", value: identifier }],
-	});
+	const existing = await ensureResourceRow(ctx, opts, identifier);
 	if (!existing) {
 		throw new APIError("NOT_FOUND", {
 			error: "not_found",
@@ -217,7 +246,12 @@ export async function updateResourceEndpoint(
 			error_description: `resource ${identifier} not found`,
 		});
 	}
-	return ctx.json(refreshed);
+	const configured = getConfiguredResource(opts, identifier);
+	const mode = opts.resourceSeedMode ?? "insertOnly";
+	const result = configured
+		? combineResource(refreshed, configured, mode)
+		: refreshed;
+	return ctx.json(result ?? refreshed);
 }
 
 export async function deleteResourceEndpoint(
@@ -228,8 +262,15 @@ export async function deleteResourceEndpoint(
 	const session = await getSessionFromCtx(ctx);
 	await assertResourcePrivileges(ctx, session, opts, "delete", identifier);
 
-	// Verify the row exists so we can return a clean 404 (vs. an opaque
-	// "0 rows affected" result from the adapter).
+	const configured = getConfiguredResource(opts, identifier);
+	if (configured) {
+		throw new APIError("BAD_REQUEST", {
+			error: "invalid_request",
+			error_description: `cannot delete code-configured resource ${identifier}`,
+		});
+	}
+
+	// Verify the row exists in DB
 	const existing = await ctx.context.adapter.findOne<OAuthResource>({
 		model: resourceModel(opts),
 		where: [{ field: "identifier", value: identifier }],
@@ -241,6 +282,10 @@ export async function deleteResourceEndpoint(
 		});
 	}
 
+	await ctx.context.adapter.deleteMany({
+		model: linkModel(opts),
+		where: [{ field: "resourceId", value: identifier }],
+	});
 	await ctx.context.adapter.delete({
 		model: resourceModel(opts),
 		where: [{ field: "identifier", value: identifier }],
@@ -270,18 +315,6 @@ export async function linkClientResourceEndpoint(
 	const clientId = decodePathParam(ctx.params.client_id);
 	await assertResourcePrivileges(ctx, session, opts, "link", resourceId);
 
-	// Confirm both ends exist so the FK cascade doesn't surface as a
-	// generic 500.
-	const resource = await ctx.context.adapter.findOne<OAuthResource>({
-		model: resourceModel(opts),
-		where: [{ field: "identifier", value: resourceId }],
-	});
-	if (!resource) {
-		throw new APIError("NOT_FOUND", {
-			error: "not_found",
-			error_description: `resource ${resourceId} not found`,
-		});
-	}
 	const client = await ctx.context.adapter.findOne({
 		model: clientModel(opts),
 		where: [{ field: "clientId", value: clientId }],
@@ -290,6 +323,16 @@ export async function linkClientResourceEndpoint(
 		throw new APIError("NOT_FOUND", {
 			error: "not_found",
 			error_description: `client ${clientId} not found`,
+		});
+	}
+
+	// Confirm resource exists so the FK cascade doesn't surface as a
+	// generic 500. Lazily ensures row for code-configured resource.
+	const resource = await ensureResourceRow(ctx, opts, resourceId);
+	if (!resource) {
+		throw new APIError("NOT_FOUND", {
+			error: "not_found",
+			error_description: `resource ${resourceId} not found`,
 		});
 	}
 
