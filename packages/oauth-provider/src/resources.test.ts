@@ -261,6 +261,12 @@ describe("getResource and in-memory resolution", () => {
 			allowedScopes: ["admin:read"],
 			signingAlgorithm: "EdDSA",
 		});
+
+		const afterLookupDbRow = await ctx.adapter.findOne({
+			model: "oauthResource",
+			where: [{ field: "identifier", value: "https://api.example.com/admin" }],
+		});
+		expect(afterLookupDbRow).toBeNull();
 	});
 
 	it("logs the enforcePerClientResources resolution at init", async () => {
@@ -434,13 +440,14 @@ describe("multi-instance resourceCache isolation", () => {
 		});
 		const ctxA = await authA.$context;
 
-		// Seed row in the DB with null TTL
+		// Seed row in the DB with null accessTokenTtl and specific refreshTokenTtl
 		await ctxA.adapter.create({
 			model: "oauthResource",
 			data: {
 				identifier,
 				name: "DB Base Name",
 				accessTokenTtl: null,
+				refreshTokenTtl: 1200,
 				createdAt: new Date(),
 				updatedAt: new Date(),
 			} as never,
@@ -468,6 +475,7 @@ describe("multi-instance resourceCache isolation", () => {
 		);
 		expect(resA?.accessTokenTtl).toBe(111);
 		expect(resA?.name).toBe("Instance A Name");
+		expect(resA?.refreshTokenTtl).toBe(1200);
 
 		// Instance B lookup hits the cached DB row and combines with Instance B's configuration
 		const resB = await getResource(
@@ -477,5 +485,6 @@ describe("multi-instance resourceCache isolation", () => {
 		);
 		expect(resB?.accessTokenTtl).toBe(999);
 		expect(resB?.name).toBe("Instance B Name");
+		expect(resB?.refreshTokenTtl).toBe(1200);
 	});
 });

@@ -613,7 +613,7 @@ function resolveEnforcePerClientResources(
  * Module-scoped so admin CRUD handlers can invalidate from anywhere via
  * {@link invalidateResourceCache}.
  */
-const resourceCache = new Map<string, OAuthResource>();
+const resourceCache = new Map<string, OAuthResource | null>();
 
 /**
  * Removes an entry from the resource cache. Called by admin CRUD handlers
@@ -664,21 +664,15 @@ export function getConfiguredResourcesMap(
 						continue;
 					}
 				} else if (check && typeof check === "object" && "then" in check) {
-					check
-						.then((ok) => {
-							if (!ok) {
-								logger.warn(
-									`oauth-provider: skipping resource for ${input.identifier} — custom validator returned false`,
-								);
-								map.delete(input.identifier);
-							}
-						})
-						.catch((err) => {
-							logger.warn(
-								`oauth-provider: skipping resource for ${input.identifier} — custom validator threw: ${err instanceof Error ? err.message : String(err)}`,
-							);
-							map.delete(input.identifier);
-						});
+					logger.warn(
+						`oauth-provider: skipping resource for ${input.identifier} — asynchronous identifierValidator is not supported during synchronous in-memory initialization`,
+					);
+					continue;
+				} else {
+					logger.warn(
+						`oauth-provider: skipping resource for ${input.identifier} — custom validator returned unexpected non-boolean value`,
+					);
+					continue;
 				}
 			} catch (err) {
 				logger.warn(
@@ -713,13 +707,19 @@ export function getConfiguredResourcesMap(
 			refreshTokenTtl: input.refreshTokenTtl ?? null,
 			signingAlgorithm: input.signingAlgorithm ?? null,
 			signingKeyId: input.signingKeyId ?? null,
-			allowedScopes: input.allowedScopes ?? null,
-			customClaims: input.customClaims ?? null,
+			allowedScopes: input.allowedScopes ? [...input.allowedScopes] : null,
+			customClaims:
+				input.customClaims && typeof input.customClaims === "object"
+					? { ...input.customClaims }
+					: null,
 			dpopBoundAccessTokensRequired:
 				input.dpopBoundAccessTokensRequired ?? false,
 			disabled: input.disabled ?? false,
 			policyVersion: 1,
-			metadata: input.metadata ?? null,
+			metadata:
+				input.metadata && typeof input.metadata === "object"
+					? { ...input.metadata }
+					: null,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -745,6 +745,21 @@ export type ResourceSeedMode = NonNullable<
 	OAuthOptions<Scope[]>["resourceSeedMode"]
 >;
 
+function cloneResource(resource: OAuthResource): OAuthResource {
+	return {
+		...resource,
+		allowedScopes: resource.allowedScopes ? [...resource.allowedScopes] : null,
+		customClaims:
+			resource.customClaims && typeof resource.customClaims === "object"
+				? { ...resource.customClaims }
+				: null,
+		metadata:
+			resource.metadata && typeof resource.metadata === "object"
+				? { ...resource.metadata }
+				: null,
+	};
+}
+
 /**
  * Combines a database row with an in-memory configured resource according to the seed mode:
  * - `insertOnly` (default): if dbRow exists, return dbRow; else return configured.
@@ -759,59 +774,27 @@ export function combineResource(
 	mode: ResourceSeedMode = "insertOnly",
 ): OAuthResource | null {
 	if (!configured) return dbRow;
-	if (!dbRow) return { ...configured.resource };
+	if (!dbRow) return cloneResource(configured.resource);
 
 	if (mode === "insertOnly") {
 		return dbRow;
 	}
 
 	if (mode === "merge") {
-		const { input } = configured;
-		return {
-			...dbRow,
-			name:
-				input.name !== undefined
-					? (input.name ?? input.identifier)
-					: dbRow.name,
-			accessTokenTtl:
-				input.accessTokenTtl !== undefined
-					? (input.accessTokenTtl ?? null)
-					: dbRow.accessTokenTtl,
-			refreshTokenTtl:
-				input.refreshTokenTtl !== undefined
-					? (input.refreshTokenTtl ?? null)
-					: dbRow.refreshTokenTtl,
-			signingAlgorithm:
-				input.signingAlgorithm !== undefined
-					? (input.signingAlgorithm ?? null)
-					: dbRow.signingAlgorithm,
-			signingKeyId:
-				input.signingKeyId !== undefined
-					? (input.signingKeyId ?? null)
-					: dbRow.signingKeyId,
-			allowedScopes:
-				input.allowedScopes !== undefined
-					? (input.allowedScopes ?? null)
-					: dbRow.allowedScopes,
-			customClaims:
-				input.customClaims !== undefined
-					? (input.customClaims ?? null)
-					: dbRow.customClaims,
-			dpopBoundAccessTokensRequired:
-				input.dpopBoundAccessTokensRequired !== undefined
-					? (input.dpopBoundAccessTokensRequired ?? false)
-					: dbRow.dpopBoundAccessTokensRequired,
-			disabled: input.disabled !== undefined ? input.disabled : dbRow.disabled,
-			metadata:
-				input.metadata !== undefined
-					? (input.metadata ?? null)
-					: dbRow.metadata,
-		};
+		const merged = { ...dbRow };
+		const input = configured.input;
+		const res = configured.resource;
+		for (const key of Object.keys(input) as Array<keyof OAuthResourceInput>) {
+			if (input[key] !== undefined && key !== "identifier" && key in res) {
+				Reflect.set(merged, key, res[key as keyof OAuthResource]);
+			}
+		}
+		return cloneResource(merged);
 	}
 
 	if (mode === "overwrite") {
 		return {
-			...configured.resource,
+			...cloneResource(configured.resource),
 			id: dbRow.id,
 			createdAt: dbRow.createdAt,
 			updatedAt: dbRow.updatedAt,
@@ -839,18 +822,28 @@ export async function getResource(
 	const isCached = opts.cachedResources?.has(identifier);
 
 	if (isCached && resourceCache.has(identifier)) {
-		dbResource = Object.assign({}, resourceCache.get(identifier)!);
+		const cached = resourceCache.get(identifier);
+		dbResource = cached ? Object.assign({}, cached) : null;
 	} else {
 		dbResource = await ctx.context.adapter.findOne<OAuthResource>({
 			model: opts.schema?.oauthResource?.modelName ?? "oauthResource",
 			where: [{ field: "identifier", value: identifier }],
 		});
-		if (dbResource && isCached) {
-			resourceCache.set(identifier, Object.assign({}, dbResource));
+		if (isCached) {
+			resourceCache.set(
+				identifier,
+				dbResource ? Object.assign({}, dbResource) : null,
+			);
 		}
 	}
 
-	const adapter = ctx.context?.adapter as object | undefined;
+	const adapter = (
+		"context" in ctx && ctx.context?.adapter
+			? ctx.context.adapter
+			: "adapter" in ctx
+				? ctx.adapter
+				: undefined
+	) as object | undefined;
 	if (
 		adapter &&
 		seededIdentifiersByAdapter.get(adapter)?.has(identifier) &&
@@ -899,7 +892,7 @@ export function collectResourceInputs(
  *
  * @internal
  */
-export function buildSeedRow(input: OAuthResourceInput, now: Date) {
+function buildSeedRow(input: OAuthResourceInput, now: Date) {
 	return {
 		identifier: input.identifier,
 		name: defaultName(input),
@@ -1026,22 +1019,21 @@ export async function seedResourcesOnce(
 				: null
 	) as object | null;
 
-	if (adapter) {
-		let set = seededIdentifiersByAdapter.get(adapter);
-		if (!set) {
-			set = new Set();
-			seededIdentifiersByAdapter.set(adapter, set);
-		}
-		for (const input of inputs) {
+	if (!adapter) return;
+
+	let set = seededIdentifiersByAdapter.get(adapter);
+	if (!set) {
+		set = new Set();
+		seededIdentifiersByAdapter.set(adapter, set);
+	}
+	for (const input of inputs) {
+		const row = await ensureResourceRow(targetCtx, oauthOpts, input.identifier);
+		if (row) {
 			set.add(input.identifier);
-			await ensureResourceRow(targetCtx, oauthOpts, input.identifier);
-		}
-	} else {
-		for (const input of inputs) {
-			await ensureResourceRow(targetCtx, oauthOpts, input.identifier);
 		}
 	}
 }
+/** @internal */
 export function resetSeedStateForTests(): void {
 	seededIdentifiersByAdapter = new WeakMap();
 }

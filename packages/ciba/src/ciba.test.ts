@@ -593,6 +593,22 @@ describe("ciba poll mode", () => {
 		await approve(url);
 		const ctx = await auth.$context;
 		const where = [{ field: "identifier", value: resource }];
+		const existingResource = await ctx.adapter.findOne({
+			model: "oauthResource",
+			where,
+		});
+		if (!existingResource) {
+			await ctx.adapter.create({
+				model: "oauthResource",
+				data: {
+					identifier: resource,
+					name: "test-resource-ciba",
+					allowedScopes: null,
+					createdAt: new Date(),
+					updatedAt: new Date(),
+				},
+			});
+		}
 		await ctx.adapter.update({
 			model: "oauthResource",
 			where,

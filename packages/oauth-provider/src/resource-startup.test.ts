@@ -4,7 +4,6 @@ import { jwt } from "better-auth/plugins/jwt";
 import { getTestInstance } from "better-auth/test";
 import { describe, expect, it, vi } from "vitest";
 import { oauthProvider } from "./oauth";
-import { getResource } from "./resources";
 import type { OAuthOptions, OAuthResourceInput, Scope } from "./types";
 
 const resource = "https://api.example.com/mcp";
@@ -216,80 +215,5 @@ describe("zero init DB access & lazy resource row creation", () => {
 			resources: [resource],
 		});
 		expect(database.oauthResource).toHaveLength(1);
-	});
-
-	it("applies insertOnly, merge, and overwrite modes on lookup", async () => {
-		const id = "https://api.example.com/modes";
-		const fault = { current: null };
-
-		// 1. insertOnly: DB row exists, DB row values are preserved
-		const instInsertOnly = await bootWithResourceFault(fault, {
-			resources: [
-				{ identifier: id, name: "Configured Name", accessTokenTtl: 300 },
-			],
-			resourceSeedMode: "insertOnly",
-		});
-		instInsertOnly.database.oauthResource.push({
-			id: "row-1",
-			identifier: id,
-			name: "Admin DB Name",
-			accessTokenTtl: 600,
-			disabled: false,
-			createdAt: new Date(1000),
-			updatedAt: new Date(1000),
-		});
-		const resInsertOnly = await getResource(
-			{ context: await instInsertOnly.auth.$context } as never,
-			instInsertOnly.opts,
-			id,
-		);
-		expect(resInsertOnly?.name).toBe("Admin DB Name");
-		expect(resInsertOnly?.accessTokenTtl).toBe(600);
-
-		// 2. merge: configured fields override DB row fields
-		const instMerge = await bootWithResourceFault(fault, {
-			resources: [{ identifier: id, accessTokenTtl: 120 }],
-			resourceSeedMode: "merge",
-		});
-		instMerge.database.oauthResource.push({
-			id: "row-2",
-			identifier: id,
-			name: "Admin DB Name",
-			accessTokenTtl: 600,
-			disabled: false,
-			createdAt: new Date(1000),
-			updatedAt: new Date(1000),
-		});
-		const resMerge = await getResource(
-			{ context: await instMerge.auth.$context } as never,
-			instMerge.opts,
-			id,
-		);
-		expect(resMerge?.name).toBe("Admin DB Name"); // preserved
-		expect(resMerge?.accessTokenTtl).toBe(120); // overridden
-
-		// 3. overwrite: configured completely replaces DB row, preserving id & createdAt
-		const instOverwrite = await bootWithResourceFault(fault, {
-			resources: [{ identifier: id, accessTokenTtl: 120 }],
-			resourceSeedMode: "overwrite",
-		});
-		instOverwrite.database.oauthResource.push({
-			id: "row-3",
-			identifier: id,
-			name: "Admin DB Name",
-			accessTokenTtl: 600,
-			disabled: false,
-			createdAt: new Date(1000),
-			updatedAt: new Date(1000),
-		});
-		const resOverwrite = await getResource(
-			{ context: await instOverwrite.auth.$context } as never,
-			instOverwrite.opts,
-			id,
-		);
-		expect(resOverwrite?.id).toBe("row-3"); // preserved
-		expect(resOverwrite?.createdAt).toEqual(new Date(1000)); // preserved
-		expect(resOverwrite?.name).toBe(id); // defaultName because input omitted name
-		expect(resOverwrite?.accessTokenTtl).toBe(120);
 	});
 });

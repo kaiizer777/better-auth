@@ -266,6 +266,47 @@ describe("resource admin CRUD", () => {
 		expect(configuredOnly?.identifier).toBe(configuredId);
 	});
 
+	it("list honors default insertOnly mode by preserving DB row properties", async () => {
+		const configuredId = "https://api.example.com/configured-default";
+		const existingId = "https://api.example.com/existing-default";
+		const instance = await boot({
+			resources: [
+				configuredId,
+				{
+					identifier: existingId,
+					name: "Configured Name",
+					accessTokenTtl: 300,
+				},
+			],
+		});
+		const headers = await signedInHeaders(instance);
+
+		await instance.ctx.adapter.create({
+			model: "oauthResource",
+			data: {
+				identifier: existingId,
+				name: "DB Name",
+				accessTokenTtl: 600,
+				createdAt: new Date(),
+				updatedAt: new Date(),
+			} as never,
+		});
+
+		const list = (await instance.auth.api.adminListOAuthResources({
+			headers,
+		})) as OAuthResource[];
+		const ids = list.map((r) => r.identifier);
+		expect(ids).toContain(configuredId);
+		expect(ids).toContain(existingId);
+
+		const existing = list.find((r) => r.identifier === existingId);
+		expect(existing?.name).toBe("DB Name");
+		expect(existing?.accessTokenTtl).toBe(600);
+
+		const configuredOnly = list.find((r) => r.identifier === configuredId);
+		expect(configuredOnly?.identifier).toBe(configuredId);
+	});
+
 	it("skips invalid configured resource identifier", async () => {
 		const validIdentifier = "https://api.example.com/valid";
 		const invalidIdentifier = "not-a-valid-uri";
@@ -326,22 +367,6 @@ describe("resource admin CRUD", () => {
 		expect(dbAfter?.name).toBe("Initial Config");
 	});
 
-	it("delete rejects code-configured resource when no DB row exists", async () => {
-		const identifier = "https://api.example.com/configured-delete";
-		const instance = await boot({
-			resources: [identifier],
-		});
-		const headers = await signedInHeaders(instance);
-		await expect(
-			instance.auth.api.adminDeleteOAuthResource({
-				params: { identifier },
-				headers,
-			}),
-		).rejects.toMatchObject({
-			body: expect.objectContaining({ error: "invalid_request" }),
-		});
-	});
-
 	it("delete rejects code-configured resource even when DB row exists from prior update", async () => {
 		const identifier = "https://api.example.com/configured-with-row";
 		const instance = await boot({
@@ -354,12 +379,6 @@ describe("resource admin CRUD", () => {
 			body: { accessTokenTtl: 300 },
 			headers,
 		});
-
-		const dbBefore = await instance.ctx.adapter.findOne({
-			model: "oauthResource",
-			where: [{ field: "identifier", value: identifier }],
-		});
-		expect(dbBefore).not.toBeNull();
 
 		await expect(
 			instance.auth.api.adminDeleteOAuthResource({

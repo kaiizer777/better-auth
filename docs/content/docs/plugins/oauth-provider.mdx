@@ -1422,7 +1422,7 @@ Configured resources are kept in memory and resolved on demand without performin
 * **`merge`:** Code-configured fields take precedence over database values for any field defined in code (`resources`). Unconfigured fields fall back to database values.
 * **`overwrite`:** The in-memory code configuration completely overrides database values.
 
-In `merge` and `overwrite` modes, fields declared in the code configuration (`resources`) take precedence over database values when resolving resources. Thus, admin PATCH requests to database rows succeed, but code-configured values continue to be authoritative for configured fields.
+In `merge` and `overwrite` modes, admin PATCH requests to database rows succeed, but code-configured values continue to be authoritative for configured fields.
 
 <Callout type="warn">
   With Prisma on PostgreSQL, CockroachDB, or MongoDB, a resource without `allowedScopes` cannot be stored, because Prisma cannot write `null` to a list column. Requests that use any configured resource fail until you declare `allowedScopes` for that resource, listing every scope clients may request for it. This includes the resource `mcp()` adds; declare it in `resources` with the same identifier:

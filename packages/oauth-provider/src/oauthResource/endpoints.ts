@@ -159,20 +159,9 @@ export async function listResourcesEndpoint(
 		}
 	}
 
-	for (const [identifier, configured] of configuredMap.entries()) {
+	for (const [identifier, configured] of configuredMap) {
 		if (!rowIdentifiers.has(identifier)) {
-			const persistedRow = await ctx.context.adapter.findOne<OAuthResource>({
-				model: resourceModel(opts),
-				where: [{ field: "identifier", value: identifier }],
-			});
-			if (persistedRow) {
-				const combined = combineResource(persistedRow, configured, mode);
-				if (combined) {
-					result.push(combined);
-				}
-			} else {
-				result.push({ ...configured.resource });
-			}
+			result.push({ ...configured.resource });
 		}
 	}
 
@@ -207,13 +196,7 @@ export async function updateResourceEndpoint(
 	const session = await getSessionFromCtx(ctx);
 	await assertResourcePrivileges(ctx, session, opts, "update", identifier);
 
-	let existing = await ctx.context.adapter.findOne<OAuthResource>({
-		model: resourceModel(opts),
-		where: [{ field: "identifier", value: identifier }],
-	});
-	if (!existing) {
-		existing = await ensureResourceRow(ctx, opts, identifier);
-	}
+	const existing = await ensureResourceRow(ctx, opts, identifier);
 	if (!existing) {
 		throw new APIError("NOT_FOUND", {
 			error: "not_found",
